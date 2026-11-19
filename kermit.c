@@ -385,14 +385,14 @@ kermit(short f,				/* Function code */
 #endif /* DEBUG */
 	if (!ok) {			/* No match */
 	    if (t == 'E') {		/* Allow E packets to have type 1 */
-		int j;
-		j = datalen;
-		p[j++] = pbc[0];    
-		p[j] = '\0';
+		int err_i;
+		err_i = datalen;
+		p[err_i++] = pbc[0];    
+		p[err_i] = '\0';
 		if (xunchar(pbc[1]) == chk1(q,k))
 		  break;
 		else
-		  p[--j] = '\0';
+		  p[--err_i] = '\0';
 	    }
 	    freerslot(k,r_slot);
 #ifdef RECVONLY
@@ -421,14 +421,14 @@ kermit(short f,				/* Function code */
 	if (!ok) {
 	    debug(DB_LOG,"CRC ERROR t",0,t);
 	    if (t == 'E') {		/* Allow E packets to have type 1 */
-		int j;
-		j = datalen;
-		p[j++] = pbc[0];    
-		p[j++] = pbc[1];
-		p[j] = '\0';
+		int err_i;
+		err_i = datalen;
+		p[err_i++] = pbc[0];    
+		p[err_i++] = pbc[1];
+		p[err_i] = '\0';
 		if (xunchar(pbc[2]) == chk1(q,k))
 		  break;
-		else { j -=2; p[j] = '\0'; }
+		else { err_i -=2; p[err_i] = '\0'; }
 	    }
 	    freerslot(k,r_slot);
 #ifdef RECVONLY
@@ -528,10 +528,10 @@ kermit(short f,				/* Function code */
 	}
 	k->filename = *(k->filelist);	/* Get next filename */
 	if (k->filename) {		/* If there is one */
-	    int i;
-	    for (i = 0; i < FN_MAX; i++) { /* Copy name to result struct */
-		r->filename[i] = k->filename[i];
-		if (!(r->filename[i]))
+	    int fi;
+	    for (fi = 0; fi < FN_MAX; fi++) { /* Copy name to result struct */
+		r->filename[fi] = k->filename[fi];
+		if (!(r->filename[fi]))
 		    break;
 	    }
 	    (k->filelist)++;
@@ -1119,7 +1119,11 @@ rpar(struct k_data * k, char type) {
 #endif /* F_CRC */
 
     d = k->ack_s;                       /* Where to put it */
+#if P_PKTLEN > 94
     d[ 0] = tochar(94);                 /* Maximum short-packet length */
+#else
+    d[ 0] = tochar(P_PKTLEN);           /* Maximum short-packet length */
+#endif
     d[ 1] = tochar(k->s_timo);          /* When I want to be timed out */
     d[ 2] = tochar(0);                  /* How much padding I need */
     d[ 3] = ctl(0);                     /* Padding character I want */
@@ -1529,7 +1533,7 @@ epkt(char * msg, struct k_data * k) {
     if (!(k->bctf)) {			/* Unless FORCE 3 */
 	k->bct = 1;
     }
-    (void) spkt('E', 0, -1, (UCHAR *) msg, k);
+    spkt('E', 0, -1, (UCHAR *) msg, k);
 }
 
 STATIC int				/* Fill a packet from string s. */
@@ -1547,7 +1551,7 @@ encstr(UCHAR * s, struct k_data * k, struct k_response *r) {
 STATIC void
 decstr(UCHAR * s, struct k_data * k, struct k_response * r) {
     k->ostring = s;			/* Set output string pointer  */
-    (void) decode(k, r, 0, s);
+    decode(k, r, 0, s);
     *(k->ostring) = '\0';		/* Terminate with null */
     k->ostring = (UCHAR *)0;		/* Reset output string pointer */
 }
