@@ -100,7 +100,7 @@ kermit(short f,				/* Function code */
     int datalen;                        /* Length of packet data field */
     UCHAR *p;                           /* Pointer to packet data field */
     UCHAR *q;                           /* Pointer to data to be checked */
-    UCHAR *s;				/* Worker string pointer */
+    UCHAR *s = (UCHAR *)0;                /* Optional cancellation text for ACK */
     UCHAR c, t;                         /* Worker chars */
     UCHAR pbc[4];                       /* Copy of packet block check */
     short seq, prev;			/* Copies of sequence numbers */
@@ -296,6 +296,10 @@ kermit(short f,				/* Function code */
     k->ipktinfo[r_slot].dat = p;	/* Data field, maybe */
 #ifdef F_LP
     if (k->ipktinfo[r_slot].len == 0) {	/* Length 0 means long packet */
+        if (len < 7) {
+            freerslot(k,r_slot);
+            return(X_ERROR);
+        }
         c = p[2];                       /* Get header checksum */
         p[2] = '\0';
         if (xunchar(c) != chk1(p-3,k)) {  /* Check it */
@@ -327,7 +331,7 @@ kermit(short f,				/* Function code */
 	chklen = 3;
     } else {
 	if (t == 'S' || k->state == S_INIT) { /* S-packet was retransmitted? */
-	    if (q[10] == '5') {		/* Block check type requested is 5 */
+	    if (len >= 12 && q[10] == '5') {		/* Block check type requested is 5 */
 		k->bctf = 1;		/* FORCE 3 */
 		chklen = 3;
 	    }
@@ -341,6 +345,11 @@ kermit(short f,				/* Function code */
     chklen = 1;				/* Block check is always type 1 */
     datalen = k->ipktinfo[r_slot].len - 3; /* Data length */
 #endif /* F_CRC */
+    if (datalen < 0 || chklen < 1 || chklen > 3 ||
+        p - q + datalen + chklen != len) {
+        freerslot(k,r_slot);
+        return(X_ERROR);
+    }
     debug(DB_LOG,"bct",0,(k->bct));
     debug(DB_LOG,"datalen",0,datalen);
     debug(DB_LOG,"chkalen",0,chklen);
@@ -637,7 +646,6 @@ kermit(short f,				/* Function code */
 		epkt("Filename error",k); /* Error decoding filename */
 	    }
         } else if (t == 'B') {          /* Break, end of transaction */
-            freerslot(k,r_slot);
             rc = (ack(k, k->r_seq, (UCHAR *)0) == X_OK) ? X_DONE : X_ERROR;
 
         } else {
@@ -655,83 +663,55 @@ kermit(short f,				/* Function code */
 	    if (x > -1)
 	      k->binary = x;
             freerslot(k,r_slot);
-            ack(k, k->r_seq, (UCHAR *) "Y"); /* Always accept the file */
-            return(X_OK);
-        } else
+            return(ack(k, k->r_seq, (UCHAR *) "Y"));
+        }
 #endif /* F_AT */
-	  if (t == 'D') {		/* First data packet */
-            k->obufpos = 0;             /* Initialize output buffer */
-	    k->filename = r->filename;
-	    r->sofar = 0L;
-            if ((rc = (*(k->openf))(k,r->filename, 2)) == X_OK) {
-                k->state = R_DATA;      /* Switch to Data state */
-		r->status = k->state;
-                rc = decode(k, r, 1, p); /* Write out first data packet */
-                freerslot(k,r_slot);
-            } else {
-                epkt("File refused or can't be opened", k);
-                freerslot(k,r_slot);
-                return(rc);
-            }
-            if (rc == X_OK)
-              rc = ack(k, k->r_seq, s);
-            else
-              epkt("Error writing data", k);
-            return(rc);
-	} else if (t == 'Z') {		/* Empty file */
-	    debug(DB_LOG,"R_ATTR empty file",r->filename,0);
-            k->obufpos = 0;             /* Initialize output buffer */
-	    k->filename = r->filename;
-	    r->sofar = 0L;		/* Open and close the file */
-            if ((rc = (*(k->openf))(k,r->filename, 2)) == X_OK) {
-		if (((rc = (*(k->closef))(k,*p,2)) == X_OK)) {
-		    k->state = R_FILE;
-		    rc = ack(k, k->r_seq, s);
-		} else {
-		    epkt("Error closing empty file", k);
-		    freerslot(k,r_slot);
-		    return(rc);
-		}
-            } else {
-                epkt("File refused or can't be opened", k);
-                freerslot(k,r_slot);
-                return(rc);
-            }
-	    r->status = k->state;
+        if (t != 'D' && t != 'Z') {
+            epkt("Unexpected packet type", k);
             freerslot(k,r_slot);
-
-        } else {
-            epkt("Unexpected packet type",k);
             return(X_ERROR);
         }
-        break;
-
-      case R_DATA:                      /* Want a D or Z packet */
-	debug(DB_CHR,"R_DATA t",0,t);
-        if (t == 'D') {                 /* Data */
-            rc = decode(k, r, 1, p);	/* Decode it */
+        k->obufpos = 0;
+        k->filename = r->filename;
+        r->sofar = 0L;
+        rc = k->openf(k, r->filename, 2);
+        if (rc != X_OK) {
+            epkt("File refused or can't be opened", k);
             freerslot(k,r_slot);
-        } else if (t == 'Z') {          /* End of file */
-	    debug(DB_CHR,"R_DATA",0,t);
-            if (k->obufpos > 0) {       /* Flush output buffer */
-                rc = (*(k->writef))(k,k->obuf,k->obufpos);
-		debug(DB_LOG,"R_DATA writef rc",0,rc);
-		r->sofar += k->obufpos;
+            return(rc);
+        }
+        k->state = r->status = R_DATA;
+        /* Fall through for the first data packet or the EOF of an empty file. */
+
+      case R_DATA:
+        if (t == 'D') {
+            rc = decode(k, r, 1, p);
+        } else if (t == 'Z') {
+            rc = X_OK;
+            if (k->obufpos > 0) {
+                rc = k->writef(k, k->obuf, k->obufpos);
+                if (rc == X_OK)
+                    r->sofar += k->obufpos;
                 k->obufpos = 0;
             }
-            if (((rc = (*(k->closef))(k,*p,2)) == X_OK) && (rc == X_OK))
-              k->state = R_FILE;
-	    debug(DB_LOG,"R_DATA closef rc",0,rc);
-	    r->status = k->state;
-            freerslot(k,r_slot);
         } else {
-            epkt("Unexpected packet type",k);
+            epkt("Unexpected packet type", k);
+            freerslot(k,r_slot);
             return(X_ERROR);
         }
+        if (rc != X_OK) {
+            k->closef(k, 'D', 2);       /* Discard incomplete output. */
+            k->state = r->status = R_ERROR;
+            epkt("Error writing data", k);
+        } else if (t == 'Z') {
+            rc = k->closef(k, *p, 2);
+            k->state = r->status = (rc == X_OK) ? R_FILE : R_ERROR;
+            if (rc != X_OK)
+                epkt("Can't close file", k);
+        }
+        freerslot(k,r_slot);
         if (rc == X_OK)
-          rc = ack(k, k->r_seq, s);
-        else
-          epkt(t == 'Z' ? "Can't close file" : "Error writing data",k);
+            rc = ack(k, k->r_seq, s);
         return(rc);
 
       case R_ERROR:                     /* Canceled from above */
@@ -1001,8 +981,7 @@ ack(struct k_data * k, short seq, UCHAR * text) {
 
 STATIC void
 spar(struct k_data * k, UCHAR *s, int datalen) {
-    int x, y;
-    UCHAR c;
+    int x, y = 10;
 
     s--;                                /* Line up with field numbers. */
 
@@ -1047,7 +1026,9 @@ spar(struct k_data * k, UCHAR *s, int datalen) {
             k->rptflg = 1;
         }
     }
-    if (datalen >= 10) {                /* Capability bits */
+    if (datalen < 10)
+        k->capas = 0;                   /* Peer sent no capabilities. */
+    else {
         x = xunchar(s[10]);
 
 #ifdef F_LP                             /* Long packets */
@@ -1077,12 +1058,12 @@ spar(struct k_data * k, UCHAR *s, int datalen) {
 
         /* In case other Kermit sends addt'l capas fields ... */
 
-        for (y = 10; (xunchar(s[y]) & 1) && (datalen >= y); y++) ;
+        while (y <= datalen && (xunchar(s[y]) & 1)) y++;
     }
 
 #ifdef F_LP                             /* Long Packets */
     if (k->capas & CAP_LP) {
-        if (datalen > y+1) {
+        if (datalen >= y+3) {
             x = xunchar(s[y+2]) * 95 + xunchar(s[y+3]);
             k->s_maxlen = (x > P_PKTLEN) ? P_PKTLEN : x;
             if (k->s_maxlen < 10)
@@ -1195,24 +1176,25 @@ decode(struct k_data * k, struct k_response * r, short f, UCHAR *inbuf) {
     unsigned int b8;                    /* 8th bit */
     int rpt;                            /* Repeat count */
     int rc;				/* Return code */
-    UCHAR *p;
+    UCHAR *p = r->filename;
 
     rc = X_OK;
     rpt = 0;                            /* Initialize repeat count. */
-    if (f == 0)                         /* Output function... */
-      p = r->filename;
 
     while ((a = *inbuf++ & 0xFF) != '\0') { /* Character loop */
         if (k->rptflg && a == k->rptq) { /* Got a repeat prefix? */
+            if (!inbuf[0] || !inbuf[1]) return(X_ERROR);
             rpt = xunchar(*inbuf++ & 0xFF); /* Yes, get the repeat count, */
             a = *inbuf++ & 0xFF;        /* and get the prefixed character. */
         }
         b8 = 0;                         /* 8th-bit value */
         if (k->parity && (a == k->ebq)) { /* Have 8th-bit prefix? */
             b8 = 0200;                  /* Yes, flag the 8th bit */
+            if (!*inbuf) return(X_ERROR);
             a = *inbuf++ & 0x7F;        /* and get the prefixed character. */
         }
         if (a == k->r_ctlq) {           /* If control prefix, */
+            if (!*inbuf) return(X_ERROR);
             a  = *inbuf++ & 0xFF;       /* get its operand */
             a7 = a & 0x7F;              /* and its low 7 bits. */
             if ((a7 >= 0100 && a7 <= 0137) || a7 == '?') /* Controllify */
@@ -1224,13 +1206,15 @@ decode(struct k_data * k, struct k_response * r, short f, UCHAR *inbuf) {
 
         for (; rpt > 0; rpt--) {        /* Output the char 'rpt' times */
             if (f == 0) {
+                if (p == r->filename + sizeof(r->filename) - 1)
+                    return(X_ERROR);
                 *p++ = (UCHAR) a;       /* to memory */
             } else {                    /* or to file */
                 k->obuf[k->obufpos++] = (UCHAR) a; /* Deposit the byte */
                 if (k->obufpos == k->obuflen) { /* Buffer full? */
                     rc = (*(k->writef))(k,k->obuf,k->obuflen); /* Dump it. */
-		    r->sofar += k->obuflen;
-		    if (rc != X_OK) break;
+                    if (rc != X_OK) return(rc);
+                    r->sofar += k->obuflen;
                     k->obufpos = 0;
                 }
             }
